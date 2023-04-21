@@ -12,20 +12,19 @@ pub trait PollableIterator: Iterator {
         Transform { it: self, f, done: false }
     }
 
-    fn transform_expose<B, F, X>(self, f: F, x: X) -> TransformExpose<Self, F, X>
-    where F: FnMut(Option<Self::Item>) -> Option<B>, Self: Sized {
-        TransformExpose{ transform: Transform { it: self, f, done: false }, x }
-    }
-
     fn from_fused<I: FusedIterator>(it: I) -> FromFused<I> {
         FromFused { it, done: false }
     }
 }
 
-pub trait Transformer<X, Y>: PollableIterator<Item=Y> + Extend<X> {
+pub trait PollableTransformer<X, Y>: PollableIterator<Item=Y> + Extend<X> {
     fn feed(&mut self, t: impl Into<X>) {
         self.extend(iter::once(t.into()));
     }
+}
+
+pub trait AccessorMut<T, R>: Copy {
+    fn access(self, r: &mut R) -> &mut T;
 }
 
 #[derive(Debug)]
@@ -35,10 +34,12 @@ pub struct Transform<I, F> {
     done: bool,
 }
 
-#[derive(Debug)]
-pub struct TransformExpose<I, F, X> {
-    transform: Transform<I, F>,
-    x: X,
+pub struct TransformExpose<I, R, F, A> {
+    restricted: R,
+    f: F,
+    accessor: A,
+    done: bool,
+    _phantom: PhantomData<I>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -47,29 +48,46 @@ pub struct FromFused<I> {
     done: bool,
 }
 
+impl<I, B, F> Transform<I, F>
+where I: PollableIterator, F: FnMut(Option<I::Item>) -> Option<B> {
+    #[inline]
+    fn next_impl(it: &mut I, f: &mut F, done: &mut bool) -> Option<B> {
+        if *done {
+            return None;
+        }
+        if it.is_done() {
+            let result = f(None);
+            if result.is_none() {
+                *done = true;
+            }
+            result
+        } else {
+            f(Some(it.next()?))
+        }
+    }
+
+    pub fn expose<R, A: AccessorMut<I, R>>(self, restrict: impl FnOnce(I) -> R, accessor: A)
+            -> TransformExpose<I, R, F, A> {
+        TransformExpose { restricted: restrict(self.it), f: self.f, accessor, done: self.done, _phantom: PhantomData }
+    }
+}
+
+impl<I: PollableIterator, B, R, F, A> TransformExpose<I, R, F, A>
+where I: PollableIterator, F: FnMut(Option<I::Item>) -> Option<B>, A: AccessorMut<I, R> {
+    pub fn from_restricted(restricted: R, f: F, accessor: A) -> Self {
+        Self { restricted, f, accessor, done: false, _phantom: PhantomData}
+    }
+
+    pub fn restricted_mut(&mut self) -> &mut R {
+        &mut self.restricted
+    }
+}
+
 impl<I, B, F> Iterator for Transform<I, F>
 where I: PollableIterator, F: FnMut(Option<I::Item>) -> Option<B> {
     type Item = B;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-        if self.it.is_done() {
-            let result = (self.f)(None);
-            if result.is_none() {
-                self.done = true;
-            }
-            result
-        } else {
-            (self.f)(Some(self.it.next()?))
-        }
-    }
-}
-
-impl<I, F, X, W> TransformExpose<I, F, X>
-where X: Fn(&mut I) -> W {
-    pub fn expose(&mut self) -> W {
-        (self.x)(&mut self.transform.it)
+        Self::next_impl(&mut self.it, &mut self.f, &mut self.done)
     }
 }
 
@@ -80,18 +98,22 @@ where I: PollableIterator, F: FnMut(Option<I::Item>) -> Option<B> {
     }
 }
 
-impl<I, B, F, X> Iterator for TransformExpose<I, F, X>
-where I: PollableIterator, F: FnMut(Option<I::Item>) -> Option<B> {
+impl<I, R, B, F, A> Iterator for TransformExpose<I, R, F, A>
+where I: PollableIterator, F: FnMut(Option<I::Item>) -> Option<B>, A: AccessorMut<I, R> {
     type Item = B;
     fn next(&mut self) -> Option<Self::Item> {
-        self.transform.next()
+        Transform::<I, F>::next_impl(
+            self.accessor.access(&mut self.restricted),
+            &mut self.f,
+            &mut self.done
+        )
     }
 }
 
-impl<I, B, F, X> PollableIterator for TransformExpose<I, F, X>
-where I: PollableIterator, F: FnMut(Option<I::Item>) -> Option<B> {
+impl<I, R, B, F, A> PollableIterator for TransformExpose<I, R, F, A>
+where I: PollableIterator, F: FnMut(Option<I::Item>) -> Option<B>, A: AccessorMut<I, R> {
     fn is_done(&self) -> bool {
-        self.transform.is_done()
+        self.done
     }
 }
 
