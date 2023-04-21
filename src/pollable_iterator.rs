@@ -1,9 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::iter;
 use std::iter::{Fuse, FusedIterator};
 use std::marker::PhantomData;
-
-pub struct Hidden(());
 
 pub trait PollableIterator: Iterator {
     fn is_done(&self) -> bool;
@@ -20,6 +19,12 @@ pub trait PollableIterator: Iterator {
 
     fn from_fused<I: FusedIterator>(it: I) -> FromFused<I> {
         FromFused { it, done: false }
+    }
+}
+
+pub trait Transformer<X, Y>: PollableIterator<Item=Y> + Extend<X> {
+    fn feed(&mut self, t: impl Into<X>) {
+        self.extend(iter::once(t.into()));
     }
 }
 

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use crate::pollable_iterator::{Transformer, TransformExpose};
 use crate::PollableIterator;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -87,11 +88,27 @@ impl<'a, T> From<&'a mut PollableQueue<T>> for PollableQueueBack<'a, T> {
     }
 }
 
+impl<'a, T> Extend<T> for PollableQueueBack<'a, T> {
+    fn extend<I: IntoIterator<Item=T>>(&mut self, iter: I) {
+        iter.into_iter().for_each(|t| self.push(t))
+    }
+}
+
+impl<T, F, X, W> Extend<T> for TransformExpose<PollableQueue<T>, F, X>
+where X: Fn(&mut PollableQueue<T>) -> W, W: Extend<T> {
+    fn extend<I: IntoIterator<Item=T>>(&mut self, iter: I) {
+        self.expose().extend(iter)
+    }
+}
+
+impl<T, F, B, X, W> Transformer<T, B> for TransformExpose<PollableQueue<T>, F, X>
+where X: Fn(&mut PollableQueue<T>) -> W, W: Extend<T>, F: FnMut(Option<T>) -> Option<B> {}
+
 #[cfg(test)]
 mod test {
     use std::collections::VecDeque;
     use std::mem;
-    use crate::pollable_iterator::{Transform, TransformExpose};
+    use crate::pollable_iterator::{Transform, Transformer, TransformExpose};
     use crate::pollable_queue::{PollableQueue, PollableQueueBack};
     use crate::PollableIterator;
 
@@ -137,7 +154,7 @@ mod test {
         }
     }
 
-    fn make_upper_extractor() -> TransformExpose<
+    fn make_upper_extractor_impl() -> TransformExpose<
         PollableQueue<String>,
         impl FnMut(Option<String>) -> Option<String>,
         impl Fn(&mut PollableQueue<String>) -> PollableQueueBack<String>
@@ -145,7 +162,7 @@ mod test {
         let queue: PollableQueue<String> = PollableQueue::new();
         let mut extractor = Extractor::new();
         queue.transform_expose(
-            move |maybe_s| {
+            move |maybe_s| -> Option<String> {
                 if let Some(s) = maybe_s {
                     extractor.process_many(s.chars());
                 }
@@ -153,5 +170,9 @@ mod test {
             },
             PollableQueue::expose
         )
+    }
+
+    fn make_upper_extractor() -> impl PollableIterator<Item=String> {
+        make_upper_extractor_impl()
     }
 }
