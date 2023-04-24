@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::marker::PhantomData;
-use crate::pollable_iterator::{AccessorMut, PollableTransformer, TransformExpose};
+use crate::pollable_iterator::{PollableTransformer, Transform};
 use crate::PollableIterator;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -9,23 +9,9 @@ pub struct PollableQueue<T> {
     closed: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct PollableQueueBack<T> {
-    inner: PollableQueue<T>,
+pub struct ConsumingIter<'a, T, F> {
+    transform: &'a mut Transform<PollableQueue<T>, F>,
 }
-
-#[derive(Debug)]
-pub struct PollableQueueAccessor<T> {
-    _phantom: PhantomData<T>,
-}
-
-impl<T> Clone for PollableQueueAccessor<T> {
-    fn clone(&self) -> Self {
-        Self { _phantom: self._phantom }
-    }
-}
-
-impl<T> Copy for PollableQueueAccessor<T> {}
 
 impl<T> PollableQueue<T> {
     pub fn new() -> Self {
@@ -43,43 +29,6 @@ impl<T> PollableQueue<T> {
 
     pub fn closed(&self) -> bool {
         self.closed
-    }
-
-    pub fn restrict(self) -> PollableQueueBack<T> {
-        PollableQueueBack { inner: self }
-    }
-
-    pub fn create_transformer<F: FnMut(Option<T>) -> Option<B>, B>(f: F) -> impl PollableTransformer<T, B> {
-        let queue = Self::new();
-        queue
-            .transform(f)
-            .expose(|queue| queue.restrict(), PollableQueueAccessor::new())
-    }
-}
-
-impl<T> PollableQueueBack<T> {
-    pub fn push(&mut self, t: T) {
-        self.inner.push(t);
-    }
-
-    pub fn close(&mut self) {
-        self.inner.close();
-    }
-
-    pub fn closed(&self) -> bool {
-        self.inner.closed()
-    }
-}
-
-impl<T> PollableQueueAccessor<T> {
-    fn new() -> Self {
-        Self { _phantom: PhantomData }
-    }
-}
-
-impl<T> AccessorMut<PollableQueue<T>, PollableQueueBack<T>> for PollableQueueAccessor<T> {
-    fn access(self, r: &mut PollableQueueBack<T>) -> &mut PollableQueue<T> {
-        &mut r.inner
     }
 }
 
@@ -115,34 +64,44 @@ impl<T> PollableIterator for PollableQueue<T> {
     }
 }
 
-impl<T> From<PollableQueue<T>> for PollableQueueBack<T> {
-    fn from(value: PollableQueue<T>) -> Self {
-        Self { inner: value }
-    }
-}
-
-impl<T> Extend<T> for PollableQueueBack<T> {
-    fn extend<I: IntoIterator<Item=T>>(&mut self, iter: I) {
-        iter.into_iter().for_each(|t| self.push(t))
-    }
-}
-
-impl<T, F, B> Extend<T> for TransformExpose<PollableQueue<T>, PollableQueueBack<T>, F, PollableQueueAccessor<T>>
+impl<'a, T, F, B> Iterator for ConsumingIter<'a, T, F>
 where F: FnMut(Option<T>) -> Option<B> {
-    fn extend<I: IntoIterator<Item=T>>(&mut self, iter: I) {
-        self.restricted_mut().extend(iter)
+    type Item = B;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.transform.next()
     }
 }
 
-impl<T, F, B> PollableTransformer<T, B> for TransformExpose<PollableQueue<T>, PollableQueueBack<T>, F, PollableQueueAccessor<T>>
-where F: FnMut(Option<T>) -> Option<B> {}
+impl<'a, T, F, B> PollableIterator for ConsumingIter<'a, T, F>
+where F: FnMut(Option<T>) -> Option<B> {
+    fn is_done(&self) -> bool {
+        self.transform.is_done()
+    }
+}
+
+impl<T, F> Extend<T> for Transform<PollableQueue<T>, F> {
+    fn extend<I: IntoIterator<Item=T>>(&mut self, iter: I) {
+        self.it.extend(iter)
+    }
+}
+
+impl<T, F, B> PollableTransformer<T, B> for Transform<PollableQueue<T>, F>
+where F: FnMut(Option<T>) -> Option<B> {
+    type ConsumingIter<'a> where T: 'a, F: 'a = ConsumingIter<'a, T, F>;
+    fn consuming_iter(&mut self) -> Self::ConsumingIter<'_> {
+        ConsumingIter { transform: self }
+    }
+    fn close(&mut self) {
+        self.it.close()
+    }
+}
 
 #[cfg(test)]
 mod test {
     use std::collections::VecDeque;
     use std::mem;
-    use crate::pollable_iterator::{Transform, PollableTransformer, TransformExpose};
-    use crate::pollable_queue::{PollableQueue, PollableQueueAccessor, PollableQueueBack};
+    use crate::pollable_iterator::{Transform, PollableTransformer};
+    use crate::pollable_queue::{PollableQueue};
     use crate::PollableIterator;
 
     struct Extractor {
@@ -187,15 +146,30 @@ mod test {
         }
     }
 
-    fn make_upper_extractor() -> impl PollableTransformer<String, String> {
+    fn make_upper_extractor<'a>() -> impl PollableTransformer<&'a str, String> {
         let mut extractor = Extractor::new();
-        PollableQueue::create_transformer(
-            move |maybe_s: Option<String>| -> Option<String> {
+        PollableQueue::new().transform(
+            move |maybe_s: Option<&'a str>| -> Option<String> {
                 if let Some(s) = maybe_s {
                     extractor.process_many(s.chars());
                 }
                 extractor.contents.pop_front()
             }
         )
+    }
+
+    #[test]
+    fn test_upper_extractor() {
+        let n = 7;
+        let rest: Vec<_> = (0..n).map(|i| format!("{i}")).collect();
+        let mut extractor = make_upper_extractor();
+        let mut caps = vec![];
+        extractor.extend(["  Fo", "oBA", "R; HEL", "L", "O  Wurld WORLD", "  !!"]);
+        caps.extend(extractor.consuming_iter());
+        extractor.extend(rest.iter().map(|s| s.as_str()));
+        caps.extend(extractor.consuming_iter());
+        extractor.close();
+        caps.extend(extractor.consuming_iter());
+        assert_eq!(caps, vec![String::from("HELLO"), String::from("WORLD")]);
     }
 }
