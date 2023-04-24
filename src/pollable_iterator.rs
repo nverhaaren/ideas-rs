@@ -1,8 +1,5 @@
-use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 use std::iter;
-use std::iter::{Fuse, FusedIterator};
-use std::marker::PhantomData;
+use std::iter::FusedIterator;
 
 pub trait PollableIterator: Iterator {
     fn is_done(&self) -> bool;
@@ -52,15 +49,17 @@ where I: PollableIterator, F: FnMut(Option<I::Item>) -> Option<B> {
         if self.done {
             return None;
         }
-        if self.it.is_done() {
-            let result = (self.f)(None);
-            if result.is_none() {
-                self.done = true;
+        while !self.it.is_done() {
+            match (self.f)(Some(self.it.next()?)) {
+                None => (),
+                b@_ => return b,
             }
-            result
-        } else {
-            (self.f)(Some(self.it.next()?))
         }
+        let result = (self.f)(None);
+        if result.is_none() {
+            self.done = true;
+        }
+        result
     }
 }
 

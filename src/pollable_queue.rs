@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::marker::PhantomData;
 use crate::pollable_iterator::{PollableTransformer, Transform};
 use crate::PollableIterator;
 
@@ -87,7 +86,7 @@ impl<T, F> Extend<T> for Transform<PollableQueue<T>, F> {
 
 impl<T, F, B> PollableTransformer<T, B> for Transform<PollableQueue<T>, F>
 where F: FnMut(Option<T>) -> Option<B> {
-    type ConsumingIter<'a> where T: 'a, F: 'a = ConsumingIter<'a, T, F>;
+    type ConsumingIter<'a> = ConsumingIter<'a, T, F> where T: 'a, F: 'a;
     fn consuming_iter(&mut self) -> Self::ConsumingIter<'_> {
         ConsumingIter { transform: self }
     }
@@ -100,7 +99,7 @@ where F: FnMut(Option<T>) -> Option<B> {
 mod test {
     use std::collections::VecDeque;
     use std::mem;
-    use crate::pollable_iterator::{Transform, PollableTransformer};
+    use crate::pollable_iterator::PollableTransformer;
     use crate::pollable_queue::{PollableQueue};
     use crate::PollableIterator;
 
@@ -141,9 +140,24 @@ mod test {
             cs.into_iter().for_each(|c| self.process(c))
         }
 
+        fn finalize(&mut self) {
+            self.process(' ');
+            self.receiving = false;
+        }
+
         fn pop(&mut self) -> Option<String> {
             self.contents.pop_front()
         }
+    }
+
+    #[test]
+    fn test_extractor() {
+        let mut extractor = Extractor::new();
+        extractor.process('H');
+        assert!(extractor.pop().is_none());
+        extractor.process('I');
+        extractor.finalize();
+        assert_eq!(extractor.pop(), Some(String::from("HI")))
     }
 
     fn make_upper_extractor<'a>() -> impl PollableTransformer<&'a str, String> {
@@ -152,6 +166,8 @@ mod test {
             move |maybe_s: Option<&'a str>| -> Option<String> {
                 if let Some(s) = maybe_s {
                     extractor.process_many(s.chars());
+                } else {
+                    extractor.finalize();
                 }
                 extractor.contents.pop_front()
             }
@@ -171,5 +187,14 @@ mod test {
         extractor.close();
         caps.extend(extractor.consuming_iter());
         assert_eq!(caps, vec![String::from("HELLO"), String::from("WORLD")]);
+    }
+
+    #[test]
+    fn test_end() {
+        let mut extractor = make_upper_extractor();
+        extractor.feed("HI");
+        extractor.close();
+        let result: Vec<_> = extractor.consuming_iter().collect();
+        assert_eq!(result, [String::from("HI")]);
     }
 }
