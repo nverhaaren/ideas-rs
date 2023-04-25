@@ -2,6 +2,8 @@ use std::iter;
 use std::iter::FusedIterator;
 
 pub trait PollableIterator: Iterator {
+    // Maybe it would be better to have something like PollableIterable with an associated type
+    // which is an iterator?
     fn is_done(&self) -> bool;
 
     fn transform<F, B>(self, f: F) -> Transform<Self, F>
@@ -9,24 +11,27 @@ pub trait PollableIterator: Iterator {
         Transform { it: self, f, done: false }
     }
 
+    fn poll_iter(&mut self) -> PollIter<Self> {
+        PollIter { iter: self }
+    }
+
     fn from_fused<I: FusedIterator>(it: I) -> FromFused<I> {
         FromFused { it, done: false }
     }
 }
 
-pub trait PollableTransformer<X, Y>: Extend<X> {
-    type ConsumingIter<'a>: PollableIterator<Item=Y> where Self: 'a;
-    fn consuming_iter(&mut self) -> Self::ConsumingIter<'_>;
-
+pub trait PollableTransformer<X, Y>: Extend<X> + PollableIterator<Item=Y> {
     fn close(&mut self);
 
     fn poll(&mut self) -> Option<Y> {
-        self.consuming_iter().next()
+        self.poll_iter().next()
     }
 
     fn feed(&mut self, t: impl Into<X>) {
         self.extend(iter::once(t.into()));
     }
+
+    // transform_consume?
 }
 
 #[derive(Debug)]
@@ -36,10 +41,30 @@ pub struct Transform<I, F> {
     done: bool,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct PollIter<'a, I: ?Sized> {
+    iter: &'a mut I,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FromFused<I> {
     it: I,
     done: bool,
+}
+
+impl<'a, I: ?Sized> Iterator for PollIter<'a, I>
+where I: Iterator {
+    type Item = I::Item;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+impl<'a, I: ?Sized> PollableIterator for PollIter<'a, I>
+where I: PollableIterator {
+    fn is_done(&self) -> bool {
+        self.iter.is_done()
+    }
 }
 
 impl<I, B, F> Iterator for Transform<I, F>

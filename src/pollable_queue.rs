@@ -86,10 +86,6 @@ impl<T, F> Extend<T> for Transform<PollableQueue<T>, F> {
 
 impl<T, F, B> PollableTransformer<T, B> for Transform<PollableQueue<T>, F>
 where F: FnMut(Option<T>) -> Option<B> {
-    type ConsumingIter<'a> = ConsumingIter<'a, T, F> where T: 'a, F: 'a;
-    fn consuming_iter(&mut self) -> Self::ConsumingIter<'_> {
-        ConsumingIter { transform: self }
-    }
     fn close(&mut self) {
         self.it.close()
     }
@@ -181,11 +177,11 @@ mod test {
         let mut extractor = make_upper_extractor();
         let mut caps = vec![];
         extractor.extend(["  Fo", "oBA", "R; HEL", "L", "O  Wurld WORLD", "  !!"]);
-        caps.extend(extractor.consuming_iter());
+        caps.extend(extractor.poll_iter());
         extractor.extend(rest.iter().map(|s| s.as_str()));
-        caps.extend(extractor.consuming_iter());
+        caps.extend(extractor.poll_iter());
         extractor.close();
-        caps.extend(extractor.consuming_iter());
+        caps.extend(extractor);
         assert_eq!(caps, vec![String::from("HELLO"), String::from("WORLD")]);
     }
 
@@ -194,7 +190,7 @@ mod test {
         let mut extractor = make_upper_extractor();
         extractor.feed("HI");
         extractor.close();
-        let result: Vec<_> = extractor.consuming_iter().collect();
+        let result: Vec<_> = extractor.collect();
         assert_eq!(result, [String::from("HI")]);
     }
 }
