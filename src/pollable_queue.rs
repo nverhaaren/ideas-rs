@@ -158,7 +158,7 @@ mod test {
 
     fn make_upper_extractor<'a>() -> impl PollableTransformer<&'a str, String> {
         let mut extractor = Extractor::new();
-        PollableQueue::new().transform(
+        PollableQueue::new().transform_using(
             move |maybe_s: Option<&'a str>| -> Option<String> {
                 if let Some(s) = maybe_s {
                     extractor.process_many(s.chars());
@@ -177,9 +177,9 @@ mod test {
         let mut extractor = make_upper_extractor();
         let mut caps = vec![];
         extractor.extend(["  Fo", "oBA", "R; HEL", "L", "O  Wurld WORLD", "  !!"]);
-        caps.extend(extractor.poll_iter());
+        caps.extend(extractor.by_ref());
         extractor.extend(rest.iter().map(|s| s.as_str()));
-        caps.extend(extractor.poll_iter());
+        caps.extend(extractor.by_ref());
         extractor.close();
         caps.extend(extractor);
         assert_eq!(caps, vec![String::from("HELLO"), String::from("WORLD")]);
@@ -192,5 +192,19 @@ mod test {
         extractor.close();
         let result: Vec<_> = extractor.collect();
         assert_eq!(result, [String::from("HI")]);
+    }
+
+    #[test]
+    fn test_transform_iter() {
+        let mut extractor = make_upper_extractor();
+        let mut caps = vec![];
+        caps.extend(extractor.transform_iter(["  Fo", "oBA", "R; HEL"]));
+        assert!(caps.is_empty());
+        caps.extend(extractor.transform_iter([ "L", "O  Wurld WORLD"]));
+        assert_eq!(caps, vec![String::from("HELLO")]);
+        extractor.feed(" !!");
+        extractor.close();
+        caps.extend(extractor);
+        assert_eq!(caps, vec![String::from("HELLO"), String::from("WORLD")]);
     }
 }

@@ -1,18 +1,17 @@
 use std::iter;
 use std::iter::FusedIterator;
+use std::marker::PhantomData;
 
 pub trait PollableIterator: Iterator {
-    // Maybe it would be better to have something like PollableIterable with an associated type
-    // which is an iterator?
     fn is_done(&self) -> bool;
 
-    fn transform<F, B>(self, f: F) -> Transform<Self, F>
+    fn transform_using<F, B>(self, f: F) -> Transform<Self, F>
     where F: FnMut(Option<Self::Item>) -> Option<B>, Self: Sized {
         Transform { it: self, f, done: false }
     }
 
-    fn poll_iter(&mut self) -> PollIter<Self> {
-        PollIter { iter: self }
+    fn iter_poll(&mut self) -> IterPoll<Self> {
+        IterPoll { iter: self }
     }
 
     fn from_fused<I: FusedIterator>(it: I) -> FromFused<I> {
@@ -23,15 +22,17 @@ pub trait PollableIterator: Iterator {
 pub trait PollableTransformer<X, Y>: Extend<X> + PollableIterator<Item=Y> {
     fn close(&mut self);
 
-    fn poll(&mut self) -> Option<Y> {
-        self.poll_iter().next()
-    }
-
     fn feed(&mut self, t: impl Into<X>) {
         self.extend(iter::once(t.into()));
     }
 
-    // transform_consume?
+    fn transform_iter<I, Z>(&mut self, it: impl IntoIterator<IntoIter=I>)
+        -> TransformIter<I, Self, X, Y>
+    where I: Iterator<Item=Z>, Z: Into<X> {
+        TransformIter {
+            transformer: self, it: it.into_iter(), _phantom_x: PhantomData, _phantom_y: PhantomData
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -42,7 +43,7 @@ pub struct Transform<I, F> {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct PollIter<'a, I: ?Sized> {
+pub struct IterPoll<'a, I: ?Sized> {
     iter: &'a mut I,
 }
 
@@ -52,7 +53,15 @@ pub struct FromFused<I> {
     done: bool,
 }
 
-impl<'a, I: ?Sized> Iterator for PollIter<'a, I>
+#[derive(Debug, Eq, PartialEq)]
+pub struct TransformIter<'a, I, T: ?Sized, X, Y> {
+    transformer: &'a mut T,
+    it: I,
+    _phantom_x: PhantomData<*const X>,
+    _phantom_y: PhantomData<*const Y>,
+}
+
+impl<'a, I: ?Sized> Iterator for IterPoll<'a, I>
 where I: Iterator {
     type Item = I::Item;
     fn next(&mut self) -> Option<Self::Item> {
@@ -60,7 +69,7 @@ where I: Iterator {
     }
 }
 
-impl<'a, I: ?Sized> PollableIterator for PollIter<'a, I>
+impl<'a, I: ?Sized> PollableIterator for IterPoll<'a, I>
 where I: PollableIterator {
     fn is_done(&self) -> bool {
         self.iter.is_done()
@@ -111,5 +120,19 @@ impl<I: FusedIterator> FusedIterator for FromFused<I> {}
 impl<I: FusedIterator> PollableIterator for FromFused<I> {
     fn is_done(&self) -> bool {
         self.done
+    }
+}
+
+impl<'a, I, T, X, Y, Z> Iterator for TransformIter<'a, I, T, X, Y>
+where T: PollableTransformer<X, Y>, I: Iterator<Item=Z>, Z: Into<X> {
+    type Item = Y;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let result = self.transformer.next();
+            if result.is_some() {
+                return result;
+            }
+            self.transformer.feed(self.it.next()?);
+        }
     }
 }
